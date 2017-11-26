@@ -1,12 +1,24 @@
 package org.carlspring.strongbox.providers.repository.proxied;
 
+import static java.lang.annotation.RetentionPolicy.RUNTIME;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.annotation.Documented;
+import java.lang.annotation.Retention;
+import java.nio.file.Files;
+import java.security.NoSuchAlgorithmException;
+
+import javax.inject.Inject;
+import javax.inject.Qualifier;
+
 import org.carlspring.commons.io.MultipleDigestInputStream;
 import org.carlspring.strongbox.artifact.coordinates.ArtifactCoordinates;
+import org.carlspring.strongbox.domain.ArtifactEntry;
 import org.carlspring.strongbox.domain.RemoteArtifactEntry;
-import org.carlspring.strongbox.io.ArtifactInputStream;
 import org.carlspring.strongbox.providers.ProviderImplementationException;
-import org.carlspring.strongbox.providers.io.RepositoryFileAttributes;
 import org.carlspring.strongbox.providers.io.RepositoryFileSystemProvider;
+import org.carlspring.strongbox.providers.io.RepositoryFiles;
 import org.carlspring.strongbox.providers.io.RepositoryPath;
 import org.carlspring.strongbox.providers.layout.LayoutProvider;
 import org.carlspring.strongbox.providers.repository.HostedRepositoryProvider;
@@ -22,11 +34,12 @@ import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.nio.file.Files;
 import java.security.NoSuchAlgorithmException;
+import java.util.Date;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-import static java.lang.annotation.RetentionPolicy.RUNTIME;
 
 /**
  * @author Przemyslaw Fusik
@@ -41,7 +54,7 @@ public class LocalStorageProxyRepositoryArtifactResolver
 
     @Inject
     private ArtifactEntryService artifactEntryService;
-    
+
     @Inject
     private HostedRepositoryProvider hostedRepositoryProvider;
 
@@ -50,8 +63,34 @@ public class LocalStorageProxyRepositoryArtifactResolver
                                                           final String path)
             throws IOException
     {
-        Storage storage = repository.getStorage();
-        return hostedRepositoryProvider.getInputStream(storage.getId(), repository.getId(), path);
+        final Storage storage = repository.getStorage();
+
+        final Optional<ArtifactEntry> artifactEntry = artifactEntryService.findOneAritifact(storage.getId(),
+                                                                                            repository.getId(),
+                                                                                            path);
+        final InputStream result = hostedRepositoryProvider.getInputStream(storage.getId(), repository.getId(), path);
+
+        if (artifactEntry.isPresent())
+        {
+            final ArtifactEntry artifactEntryItself = artifactEntry.get();
+            artifactEntryItself.setLastUsed(new Date());
+            artifactEntryService.save(artifactEntryItself);
+
+            if (result == null)
+            {
+                logger.error(
+                        "ArtifactEntry {} was found in the database but not found in the file system. Possible synchronization issue.",
+                        artifactEntryItself);
+            }
+        }
+        else if (result != null)
+        {
+            logger.error(
+                    "ArtifactEntry was not found in the database for artifact [{} {} {}] but found in the file system. Possible synchronization issue.",
+                    storage.getId(), repository.getId(), path);
+        }
+
+        return result;
     }
 
     @Override
@@ -73,30 +112,32 @@ public class LocalStorageProxyRepositoryArtifactResolver
         try (// Wrap the InputStream, so we could have checksums to compare
              final InputStream remoteIs = new MultipleDigestInputStream(is))
         {
-            layoutProvider.getArtifactManagementService().store(tempArtifact, remoteIs);
+            long totalNumberOfArtifactBytes = layoutProvider.getArtifactManagementService().store(tempArtifact,
+                                                                                                  remoteIs);
 
             // TODO: Add a policy for validating the checksums of downloaded artifacts
             // TODO: Validate the local checksum against the remote's checksums
             fileSystemProvider.moveFromTemporaryDirectory(artifactPath);
 
-            // Serve the downloaded artifact
-            ArtifactInputStream result = (ArtifactInputStream) Files.newInputStream(artifactPath);
-
-            ArtifactCoordinates c = (ArtifactCoordinates) Files.getAttribute(artifactPath, RepositoryFileAttributes.COORDINATES);
-            String p = artifactPath.getResourceLocation();
-
-            RemoteArtifactEntry artifactEntry = (RemoteArtifactEntry) artifactEntryService.findOne(storageId,
-                                                                                                   repositoryId,
-                                                                                                   p)
+            RemoteArtifactEntry artifactEntry = (RemoteArtifactEntry) artifactEntryService.findOneAritifact(storageId,
+                                                                                                            repositoryId,
+                                                                                                            path)
                                                                                           .orElse(new RemoteArtifactEntry());
+
+            ArtifactCoordinates c = RepositoryFiles.readCoordinates(artifactPath);
             artifactEntry.setArtifactCoordinates(c);
-            artifactEntry.setRepositoryId(storageId);
+            artifactEntry.setStorageId(storageId);
             artifactEntry.setRepositoryId(repositoryId);
             artifactEntry.setIsCached(Boolean.TRUE);
-            artifactEntry.setArtifactPath(p);
+            artifactEntry.setArtifactPath(path);
+            Date now = new Date();
+            artifactEntry.setLastUpdated(now);
+            artifactEntry.setLastUsed(now);
+            artifactEntry.setSizeInBytes(totalNumberOfArtifactBytes);
             artifactEntryService.save(artifactEntry);
 
-            return result;
+            // Serve the downloaded artifact
+            return Files.newInputStream(artifactPath);
         }
     }
 

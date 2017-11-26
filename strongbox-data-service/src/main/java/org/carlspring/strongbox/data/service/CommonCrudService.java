@@ -1,10 +1,12 @@
 package org.carlspring.strongbox.data.service;
 
 import org.carlspring.strongbox.data.domain.GenericEntity;
+import org.carlspring.strongbox.data.service.impl.EntityServiceRegistry;
 
+import javax.annotation.PostConstruct;
+import javax.inject.Inject;
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
-import java.lang.reflect.Field;
 import java.util.*;
 
 import com.orientechnologies.orient.core.id.ORecordId;
@@ -26,57 +28,70 @@ public abstract class CommonCrudService<T extends GenericEntity>
     @PersistenceContext
     protected EntityManager entityManager;
 
+    @Inject
+    private EntityServiceRegistry entityServiceRegistry;
+
+    @PostConstruct
+    public void postConstruct()
+    {
+        entityServiceRegistry.register(this.getEntityClass(), this);
+    }
+
+    // TODO: recursive identification + collections
     protected void cascadeEntityIdentification(T entity)
     {
         identifyEntity(entity);
-
-        for (Field field : entity.getClass().getDeclaredFields())
-        {
+        ReflectionUtils.doWithFields(entity.getClass(), (field)->{
             ReflectionUtils.makeAccessible(field);
-            if (GenericEntity.class.isAssignableFrom(field.getType()))
+            Class<? extends GenericEntity> t = (Class<? extends GenericEntity>) field.getType();
+            if (!GenericEntity.class.isAssignableFrom(t))
             {
-                final GenericEntity subEntity = (GenericEntity) ReflectionUtils.getField(field, entity);
-                if (subEntity != null)
-                {
-                    identifyDbRecordIfPossible(subEntity);
-                }
+                return;
             }
-        }
+            
+            GenericEntity subEntity = (GenericEntity) ReflectionUtils.getField(field, entity);
+            if (subEntity == null)
+            {
+                return;
+            }
+
+            CommonCrudService<GenericEntity> entityService = (CommonCrudService<GenericEntity>) entityServiceRegistry.getEntityService(subEntity.getClass());
+            entityService.identifyEntity(subEntity);
+        });
     }
 
-    protected void identifyEntity(T entity)
+    protected boolean identifyEntity(T entity)
     {
-        if (entity.getObjectId() == null && entity.getUuid() == null)
+        if (entity.getObjectId() != null)
+        {
+            return true;
+        }
+        else if (entity.getUuid() == null)
         {
             entity.setUuid(UUID.randomUUID().toString());
+            return false;
         }
-        else
+        
+        String sQuery = String.format("SELECT @rid AS objectId FROM %s WHERE uuid = :uuid",
+                                      entity.getClass().getSimpleName());
+
+        OSQLSynchQuery<ODocument> oQuery = new OSQLSynchQuery<>(sQuery);
+        oQuery.setLimit(1);
+
+        HashMap<String, String> params = new HashMap<>();
+        params.put("uuid", entity.getUuid());
+
+        List<ODocument> resultList = getDelegate().command(oQuery).execute(params);
+        if (resultList.isEmpty())
         {
-            identifyDbRecordIfPossible(entity);
+            return false;
         }
-    }
+        
+        ODocument record = resultList.iterator().next();
+        ODocument value = record.field("objectId");
+        entity.setObjectId(value.getIdentity().toString());
 
-    protected <E extends GenericEntity> void identifyDbRecordIfPossible(E entity)
-    {
-        if (entity.getObjectId() == null && entity.getUuid() != null)
-        {
-            String sQuery = String.format("SELECT @rid AS objectId FROM %s WHERE uuid = :uuid",
-                                          entity.getClass().getSimpleName());
-
-            OSQLSynchQuery<ODocument> oQuery = new OSQLSynchQuery<>(sQuery);
-            oQuery.setLimit(1);
-
-            HashMap<String, String> params = new HashMap<>();
-            params.put("uuid", entity.getUuid());
-
-            List<ODocument> resultList = getDelegate().command(oQuery).execute(params);
-            if (!resultList.isEmpty())
-            {
-                ODocument record = resultList.iterator().next();
-                ODocument value = record.field("objectId");
-                entity.setObjectId(value.getIdentity().toString());
-            }
-        }
+        return true;
     }
 
     @Override
@@ -127,7 +142,7 @@ public abstract class CommonCrudService<T extends GenericEntity>
             resultList.add(t);
         }
 
-        return Optional.of(resultList);
+        return Optional.ofNullable(resultList.isEmpty() ? null : resultList);
     }
 
     @Override
@@ -206,7 +221,8 @@ public abstract class CommonCrudService<T extends GenericEntity>
     }
 
     /**
-     * We can get an internal OrientDB transaction API with this, which can be needed to execute some OrientDB queries,
+     * We can get an internal OrientDB transaction API with this, which can be
+     * needed to execute some OrientDB queries,
      * for example.
      *
      * @return

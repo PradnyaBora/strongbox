@@ -1,6 +1,5 @@
 package org.carlspring.strongbox.services.impl;
 
-import org.carlspring.maven.commons.util.ArtifactUtils;
 import org.carlspring.strongbox.artifact.coordinates.ArtifactCoordinates;
 import org.carlspring.strongbox.client.ArtifactTransportException;
 import org.carlspring.strongbox.configuration.Configuration;
@@ -9,7 +8,7 @@ import org.carlspring.strongbox.domain.ArtifactEntry;
 import org.carlspring.strongbox.event.artifact.ArtifactEventListenerRegistry;
 import org.carlspring.strongbox.io.ArtifactOutputStream;
 import org.carlspring.strongbox.providers.ProviderImplementationException;
-import org.carlspring.strongbox.providers.io.RepositoryFileAttributes;
+import org.carlspring.strongbox.providers.io.RepositoryFiles;
 import org.carlspring.strongbox.providers.io.RepositoryPath;
 import org.carlspring.strongbox.providers.layout.LayoutProvider;
 import org.carlspring.strongbox.providers.layout.LayoutProviderRegistry;
@@ -28,7 +27,7 @@ import org.carlspring.strongbox.storage.validation.version.VersionValidationExce
 import org.carlspring.strongbox.storage.validation.version.VersionValidator;
 
 import javax.inject.Inject;
-import javax.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -79,7 +78,7 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
 
     @Override
     @Transactional
-    public void validateAndStore(String storageId,
+    public long validateAndStore(String storageId,
                                  String repositoryId,
                                  String path,
                                  InputStream is)
@@ -87,28 +86,29 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
                    ProviderImplementationException,
                    NoSuchAlgorithmException
     {
-        performRepositoryAcceptanceValidation(storageId, repositoryId, path);
-
         Storage storage = layoutProviderRegistry.getStorage(storageId);
         Repository repository = storage.getRepository(repositoryId);
         LayoutProvider layoutProvider = layoutProviderRegistry.getProvider(repository.getLayout());
         RepositoryPath repositoryPath = layoutProvider.resolve(repository).resolve(path);
         
-        store(repositoryPath, is);
+        performRepositoryAcceptanceValidation(repositoryPath);        
+        return store(repositoryPath, is);
     }
 
     @Override
     @Transactional
-    public void store(RepositoryPath repositoryPath,
+    public long store(RepositoryPath repositoryPath,
                       InputStream is)
             throws IOException,
                    ProviderImplementationException,
                    NoSuchAlgorithmException
     {
-        try (final ArtifactOutputStream aos = (ArtifactOutputStream) Files.newOutputStream(repositoryPath))
+        try (final ArtifactOutputStream aos = getLayoutProvider(repositoryPath.getFileSystem().getRepository(),
+                                                                layoutProviderRegistry).getOutputStream(repositoryPath))
         {
-            storeArtifact(repositoryPath, is, aos);
+            long totalAmountOfBytes = storeArtifact(repositoryPath, is, aos);
             storeArtifactEntry(repositoryPath);
+            return totalAmountOfBytes;
         }
         catch (IOException e)
         {
@@ -116,7 +116,7 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
         }
     }
 
-    private void storeArtifact(RepositoryPath repositoryPath,
+    private long storeArtifact(RepositoryPath repositoryPath,
                                InputStream is,
                                final ArtifactOutputStream aos)
             throws IOException,
@@ -131,18 +131,18 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
         String artifactPathRelative = repositoryPath.getResourceLocation();
         String artifactPath = storageId + "/" + repositoryId + "/" + artifactPathRelative;
 
-        LayoutProvider layoutProvider = getLayoutProvider(repository, layoutProviderRegistry);
-
+        Boolean checksumAttribute = RepositoryFiles.isChecksum(repositoryPath);
+        
         boolean updatedMetadataFile = false;
         boolean updatedArtifactFile = false;
         boolean updatedArtifactChecksumFile = false;
-        if (Files.exists(repositoryPath.getTarget()))
+        if (Files.exists(repositoryPath))
         {
-            if (layoutProvider.isMetadata(artifactPath))
+            if (RepositoryFiles.isMetadata(repositoryPath))
             {
                 updatedMetadataFile = true;
             }
-            else if (layoutProvider.isChecksum(repositoryPath))
+            else if (checksumAttribute)
             {
                 updatedArtifactChecksumFile = true;
             }
@@ -151,8 +151,6 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
                 updatedArtifactFile = true;
             }
         }
-
-        Boolean checksumAttribute = (Boolean) Files.getAttribute(repositoryPath, RepositoryFileAttributes.CHECKSUM);
         
         // If we have no digests, then we have a checksum to store.
         if (Boolean.TRUE.equals(checksumAttribute))
@@ -169,10 +167,12 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
             artifactEventListenerRegistry.dispatchArtifactDownloadingEvent(storageId, repositoryId, artifactPath);
         }
 
+        long totalAmountOfBytes = 0l;
         int readLength;
         byte[] bytes = new byte[4096];
         while ((readLength = is.read(bytes, 0, bytes.length)) != -1)
         {
+            totalAmountOfBytes += readLength;
             // Write the artifact
             aos.write(bytes, 0, readLength);
             aos.flush();
@@ -184,6 +184,10 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
             artifactEventListenerRegistry.dispatchArtifactMetadataFileUpdatedEvent(storageId,
                                                                                    repositoryId,
                                                                                    artifactPath);
+
+            artifactEventListenerRegistry.dispatchArtifactMetadataFileUploadedEvent(storageId,
+                                                                                    repositoryId,
+                                                                                    artifactPath);
         }
         if (updatedArtifactChecksumFile)
         {
@@ -199,12 +203,6 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
             artifactEventListenerRegistry.dispatchArtifactUploadedEvent(storageId, repositoryId, artifactPath);
         }
 
-        if (!layoutProvider.isChecksum(repositoryPath) && !layoutProvider.isMetadata(repositoryPath.toString()))
-        {
-            // If this us just a regular upload of a new artifact file:
-            artifactEventListenerRegistry.dispatchArtifactUploadedEvent(storageId, repositoryId, artifactPath);
-        }
-
         Map<String, String> digestMap = aos.getDigestMap();
         if (Boolean.FALSE.equals(checksumAttribute) && !digestMap.isEmpty())
         {
@@ -215,7 +213,7 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
         if (Boolean.TRUE.equals(checksumAttribute))
         {
             byte[] checksumValue = ((ByteArrayOutputStream) aos.getCacheOutputStream()).toByteArray();
-            if (checksumValue != null && checksumValue.length > 0 && !updatedArtifactChecksumFile)
+            if (checksumValue != null && checksumValue.length > 0)
             {
                 artifactEventListenerRegistry.dispatchArtifactChecksumUploadedEvent(storageId,
                                                                                     repositoryId,
@@ -225,24 +223,32 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
                 validateUploadedChecksumAgainstCache(checksumValue, artifactPath);
             }
         }
+
+        return totalAmountOfBytes;
     }
 
+    /**
+     * TODO: Consider removal of this internal method, if point 2 will be implemented:
+     * 1. RemoteArtifactEntry are saved in LocalStorageProxyRepositoryArtifactResolver#onSuccessfulProxyRepositoryResponse
+     * 2. There will be separated implementation for uploaded hosted artifact entries
+     */
     private void storeArtifactEntry(RepositoryPath path) throws IOException
     {
         Repository repository = path.getFileSystem().getRepository();
         Storage storage = repository.getStorage();
 
-        ArtifactCoordinates artifactCoordinates = (ArtifactCoordinates) Files.getAttribute(path,
-                                                                                           RepositoryFileAttributes.COORDINATES);
+        ArtifactCoordinates artifactCoordinates = RepositoryFiles.readCoordinates(path);
 
         String artifactPath = path.getResourceLocation();
-        ArtifactEntry artifactEntry = artifactEntryService.findOne(storage.getId(), repository.getId(),
-                                                                   artifactPath)
+        ArtifactEntry artifactEntry = artifactEntryService.findOneAritifact(storage.getId(), repository.getId(),
+                                                                            artifactPath)
                                                           .orElse(createArtifactEntry(artifactCoordinates,
                                                                                       storage.getId(),
                                                                                       repository.getId(),
                                                                                       artifactPath));
-        artifactEntryService.save(artifactEntry);
+        artifactEntry = artifactEntryService.save(artifactEntry);
+        logger.debug(String.format("ArtifactEntry created/updated: id-[%s]; uuid-[%s];", artifactEntry.getObjectId(),
+                                   artifactEntry.getUuid()));
     }
 
     private void validateUploadedChecksumAgainstCache(byte[] checksum,
@@ -318,24 +324,21 @@ public abstract class AbstractArtifactManagementService implements ArtifactManag
         return artifactEntry;
     }
     
-    private boolean performRepositoryAcceptanceValidation(String storageId,
-                                                          String repositoryId,
-                                                          String path)
+    private boolean performRepositoryAcceptanceValidation(RepositoryPath path)
             throws IOException, ProviderImplementationException
     {
         logger.info(String.format("Validate artifact with path [%s]", path));
         
-        artifactOperationsValidator.validate(storageId, repositoryId, path);
+        Repository repository = path.getFileSystem().getRepository();
+        Storage storage = repository.getStorage();
+        
+        artifactOperationsValidator.validate(storage.getId(), repository.getId(), path.relativize().toString());
 
-        final Storage storage = getStorage(storageId);
-        final Repository repository = storage.getRepository(repositoryId);
+        ;
 
-        if (!path.contains("/maven-metadata.") &&
-            !ArtifactUtils.isMetadata(path) && !ArtifactUtils.isChecksum(path))
+        if (!RepositoryFiles.isMetadata(path) && !RepositoryFiles.isChecksum(path))
         {
-            LayoutProvider layoutProvider = layoutProviderRegistry.getProvider(repository.getLayout());
-            ArtifactCoordinates coordinates = layoutProvider.getArtifactCoordinates(path);
-            
+            ArtifactCoordinates coordinates = RepositoryFiles.readCoordinates(path);
             logger.info(String.format("Validate artifact with coordinates [%s]", coordinates));
             
             try

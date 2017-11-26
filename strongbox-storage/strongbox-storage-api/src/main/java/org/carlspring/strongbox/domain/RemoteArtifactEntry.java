@@ -4,7 +4,6 @@ import java.io.Serializable;
 
 /**
  * @author Sergey Bespalov
- *
  */
 public class RemoteArtifactEntry
         extends ArtifactEntry
@@ -12,6 +11,11 @@ public class RemoteArtifactEntry
 {
 
     private Boolean isCached = Boolean.FALSE;
+
+    public RemoteArtifactEntry()
+    {
+        super();
+    }
 
     public Boolean getIsCached()
     {
@@ -22,5 +26,4 @@ public class RemoteArtifactEntry
     {
         this.isCached = isCached;
     }
-
 }

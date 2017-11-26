@@ -1,27 +1,10 @@
 package org.carlspring.strongbox.testing;
 
-import static org.junit.Assert.assertTrue;
-
-import java.io.IOException;
-import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
-
-import javax.inject.Inject;
-import javax.xml.bind.JAXBException;
-
-import org.apache.lucene.document.Document;
-import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.index.MultiFields;
-import org.apache.lucene.search.IndexSearcher;
-import org.apache.lucene.util.Bits;
-import org.apache.maven.index.ArtifactInfo;
-import org.apache.maven.index.context.IndexUtils;
-import org.apache.maven.index.context.IndexingContext;
+import org.carlspring.strongbox.artifact.locator.ArtifactDirectoryLocator;
 import org.carlspring.strongbox.configuration.ConfigurationManager;
+import org.carlspring.strongbox.locator.handlers.GenerateMavenMetadataOperation;
+import org.carlspring.strongbox.providers.io.RepositoryPath;
+import org.carlspring.strongbox.providers.layout.LayoutProvider;
 import org.carlspring.strongbox.providers.layout.LayoutProviderRegistry;
 import org.carlspring.strongbox.providers.search.MavenIndexerSearchProvider;
 import org.carlspring.strongbox.providers.search.SearchException;
@@ -35,6 +18,7 @@ import org.carlspring.strongbox.storage.Storage;
 import org.carlspring.strongbox.storage.indexing.IndexTypeEnum;
 import org.carlspring.strongbox.storage.indexing.RepositoryIndexManager;
 import org.carlspring.strongbox.storage.indexing.RepositoryIndexer;
+import org.carlspring.strongbox.storage.metadata.MavenMetadataManager;
 import org.carlspring.strongbox.storage.repository.Repository;
 import org.carlspring.strongbox.storage.repository.RepositoryPolicyEnum;
 import org.carlspring.strongbox.storage.repository.remote.RemoteRepository;
@@ -43,9 +27,31 @@ import org.carlspring.strongbox.storage.routing.RoutingRules;
 import org.carlspring.strongbox.storage.routing.RuleSet;
 import org.carlspring.strongbox.storage.search.SearchRequest;
 import org.carlspring.strongbox.xml.configuration.repository.MavenRepositoryConfiguration;
+
+import javax.inject.Inject;
+import javax.xml.bind.JAXBException;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.NoSuchAlgorithmException;
+import java.util.*;
+
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang.StringUtils;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.MultiFields;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.util.Bits;
+import org.apache.maven.index.ArtifactInfo;
+import org.apache.maven.index.context.IndexUtils;
+import org.apache.maven.index.context.IndexingContext;
 import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import static org.junit.Assert.assertTrue;
+
 /**
  * @author carlspring
  */
@@ -53,12 +59,9 @@ public abstract class TestCaseWithMavenArtifactGenerationAndIndexing
         extends TestCaseWithMavenArtifactGeneration
 {
 
-    private static final Logger logger = LoggerFactory.getLogger(TestCaseWithMavenArtifactGenerationAndIndexing.class);
-
     public static final int ROUTING_RULE_TYPE_DENIED = 0;
-
     public static final int ROUTING_RULE_TYPE_ACCEPTED = 1;
-
+    private static final Logger logger = LoggerFactory.getLogger(TestCaseWithMavenArtifactGenerationAndIndexing.class);
     @Inject
     protected RepositoryIndexManager repositoryIndexManager;
 
@@ -80,6 +83,8 @@ public abstract class TestCaseWithMavenArtifactGenerationAndIndexing
     @Inject
     protected StorageManagementService storageManagementService;
 
+    @Inject
+    protected MavenMetadataManager mavenMetadataManager;
 
     protected void createRepositoryWithArtifacts(Repository repository,
                                                  String ga,
@@ -193,9 +198,9 @@ public abstract class TestCaseWithMavenArtifactGenerationAndIndexing
         }
 
         Repository repository = configurationManagementService.getConfiguration()
-                .getStorage(storageId)
-                .getRepository(repositoryId);
-        
+                                                              .getStorage(storageId)
+                                                              .getRepository(repositoryId);
+
         if (features.isIndexingEnabled(repository))
         {
             features.reIndex(storageId, repositoryId, ga.replaceAll("\\.", "/").replaceAll("\\:", "\\/"));
@@ -312,6 +317,35 @@ public abstract class TestCaseWithMavenArtifactGenerationAndIndexing
         {
             indexingContext.releaseIndexSearcher(searcher);
         }
+    }
+
+    protected void generateMavenMetadata(String storageId,
+                                         String repositoryId)
+            throws IOException
+    {
+        Storage storage = getConfiguration().getStorage(storageId);
+        Repository repository = storage.getRepository(repositoryId);
+        LayoutProvider layoutProvider = layoutProviderRegistry.getProvider(repository.getLayout());
+        RepositoryPath repositoryPath = layoutProvider.resolve(repository);
+
+        ArtifactDirectoryLocator locator = new ArtifactDirectoryLocator();
+        locator.setBasedir(repositoryPath);
+        locator.setOperation(new GenerateMavenMetadataOperation(mavenMetadataManager));
+        locator.locateArtifactDirectories();
+    }
+
+    protected void deleteDirectoryRelativeToVaultDirectory(String dirPathToDelete)
+            throws Exception
+    {
+        String base = FilenameUtils.normalize(ConfigurationResourceResolver.getVaultDirectory());
+        if (StringUtils.isBlank(base))
+        {
+            throw new IllegalStateException("ConfigurationResourceResolver.getVaultDirectory() resolves to '" + base +
+                                            "' which is illegal base path here.");
+        }
+        Path basePath = Paths.get(base);
+        Path fullDirPathToDelete = basePath.resolve(dirPathToDelete);
+        Files.deleteIfExists(fullDirPathToDelete);
     }
 
     public void assertIndexContainsArtifact(String storageId,

@@ -121,7 +121,7 @@ public class NugetPackageController extends BaseArtifactController
         try
         {
             files = getPackages(storageId, repositoryId, filter, null, searchTerm,
-                                targetFramework);
+                                targetFramework, null, null);
         }
         catch (NugetFormatException e)
         {
@@ -137,8 +137,8 @@ public class NugetPackageController extends BaseArtifactController
                                             @PathVariable(name = "searchCommandName") String searchCommandName,
                                             @RequestParam(name = "$filter", required = true) String filter,
                                             @RequestParam(name = "$orderby", required = false, defaultValue = "id") String orderBy,
-                                            @RequestParam(name = "$skip", required = false, defaultValue = "0") int skip,
-                                            @RequestParam(name = "$top", required = false, defaultValue = "-1") int top,
+                                            @RequestParam(name = "$skip", required = false) Integer skip,
+                                            @RequestParam(name = "$top", required = false) Integer top,
                                             @RequestParam(name = "searchTerm", required = false) String searchTerm,
                                             @RequestParam(name = "targetFramework", required = false) String targetFramework,
                                             HttpServletResponse response)
@@ -148,7 +148,7 @@ public class NugetPackageController extends BaseArtifactController
         try
         {
             files = getPackages(storageId, repositoryId, filter, orderBy, searchTerm,
-                                                            targetFramework);
+                                targetFramework, skip, top);
         }
         catch (NugetFormatException e)
         {
@@ -199,7 +199,10 @@ public class NugetPackageController extends BaseArtifactController
                                                    String filter,
                                                    String orderBy,
                                                    String searchTerm,
-                                                   String targetFramework) throws NugetFormatException
+                                                   String targetFramework,
+                                                   Integer skip,
+                                                   Integer top)
+        throws NugetFormatException
     {
         packageSource.setStorageId(storageId);
         packageSource.setRepositoryId(repositoryId);
@@ -352,7 +355,8 @@ public class NugetPackageController extends BaseArtifactController
             return;
         }
 
-        String path = String.format("%s/%s/%s.%s.nupkg", packageId, packageVersion, packageId, packageVersion);
+        String fileName = String.format("%s.%s.nupkg", packageId, packageVersion);
+        String path = String.format("%s/%s/%s", packageId, packageVersion, fileName);
 
         try
         {
@@ -367,16 +371,13 @@ public class NugetPackageController extends BaseArtifactController
                 return;
             }
 
-            try (TempNupkgFile nupkgFile = new TempNupkgFile(is))
-            {
-                response.setHeader("Content-Disposition", String.format("attachment; filename=\"%s\"", nupkgFile.getFileName()));
-                ArtifactControllerHelper.setHeadersForChecksums(is, response);
+            response.setHeader("Content-Disposition", String.format("attachment; filename=\"%s\"", fileName));
+            ArtifactControllerHelper.setHeadersForChecksums(is, response);
 
-                // unfortunately 'new TempNupkgFile(is)' closes 'is' stream :(
-                try (InputStream isCopy = getArtifactManagementService().resolve(storageId, repositoryId, path))
-                {
-                    copyToResponse(isCopy, response);
-                }
+            // unfortunately 'new TempNupkgFile(is)' closes 'is' stream :(
+            try (InputStream isCopy = getArtifactManagementService().resolve(storageId, repositoryId, path))
+            {
+                copyToResponse(isCopy, response);
             }
 
         }
